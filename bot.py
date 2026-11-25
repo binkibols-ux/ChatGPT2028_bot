@@ -1,185 +1,63 @@
 import os
 import json
 import threading
-import requests as std_requests
+from flask import Flask
 from curl_cffi import requests as cffi_requests
-from flask import Flask, request, jsonify, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 app = Flask(__name__)
-
-# LẤY BIẾN MÔI TRƯỜNG TỪ RENDER (KHÔNG LỘ TRONG CODE GITHUB)
-TOKEN = os.environ.get("BOT_TOKEN", "")
-SECRET_PROMO_ID = os.environ.get("PROMO_CODE", "")
-# Render tự động có sẵn biến RENDER_EXTERNAL_URL (VD: https://ten-app.onrender.com)
-BASE_URL = os.environ.get("WEB_APP_URL") or os.environ.get("RENDER_EXTERNAL_URL", "")
-# Tùy chọn: Điền Proxy dân cư nếu IP của Render bị Cloudflare chặn (403)
-PROXY_URL = os.environ.get("PROXY_URL", "")
-
-MINIAPP_HTML = """<!DOCTYPE html>
-<html lang="vi">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>ChatGPT Free</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <style>
-    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { margin: 0; padding: 20px 16px; background: #f8faf9; color: #1f2937; text-align: center; }
-    .card { background: #fff; border-radius: 18px; padding: 22px 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
-    h2 { margin: 0 0 8px; font-size: 20px; color: #111827; }
-    p.sub { margin: 0 0 16px; font-size: 14px; color: #4b5563; line-height: 1.45; }
-    .step { text-align: left; background: #f3f4f6; padding: 11px 13px; border-radius: 10px; margin-bottom: 12px; font-size: 13px; line-height: 1.45; }
-    .btn-session { width: 100%; padding: 12px; border-radius: 10px; border: 1.5px solid #199473; background: #ecfdf5; color: #0d8a6a; font-weight: 600; font-size: 14px; margin-bottom: 14px; cursor: pointer; }
-    textarea { width: 100%; height: 90px; padding: 10px; border-radius: 10px; border: 1px solid #d1d5db; font-size: 12.5px; resize: none; margin-bottom: 14px; outline: none; }
-    textarea:focus { border-color: #199473; }
-    .btn-main { width: 100%; padding: 15px; border-radius: 12px; border: none; background: #199473; color: #fff; font-weight: 600; font-size: 16px; cursor: pointer; }
-    .btn-main:disabled { opacity: 0.6; }
-    #msg { margin-top: 14px; font-size: 13.5px; font-weight: 500; display: none; padding: 10px; border-radius: 8px; }
-    .ok { background: #dcfce7; color: #166534; }
-    .err { background: #fee2e2; color: #991b1b; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>🎁 Ưu Đãi Độc Quyền</h2>
-    <p class="sub">Nhận <b>1 tháng ChatGPT Plus (0đ)</b>.<br/>Thực hiện 2 bước để lấy trang kích hoạt cá nhân.</p>
-
-    <div class="step">
-      <b>Bước 1:</b> Đăng nhập sẵn <b>chatgpt.com</b> trên trình duyệt, sau đó bấm nút dưới và <b>Sao chép toàn bộ</b> đoạn mã hiện ra.
-    </div>
-    <button class="btn-session" onclick="openSession()">🔑 Mở lấy Mã Phiên (Session)</button>
-
-    <div class="step">
-      <b>Bước 2:</b> Dán mã vừa sao chép vào ô dưới để Bot kiểm tra điều kiện <b>0đ/tháng</b>.
-    </div>
-    <textarea id="sessionBox" placeholder='Dán nội dung {"user":...,"accessToken":"..."} vào đây'></textarea>
-
-    <button id="submitBtn" class="btn-main" onclick="claimPromo()">Nhận Ưu Đãi Ngay</button>
-    <div id="msg"></div>
-  </div>
-
-  <script>
-    const tg = window.Telegram.WebApp;
-    tg.ready();
-    tg.expand();
-
-    function openSession() {
-      tg.openLink("https://chatgpt.com/api/auth/session");
-    }
-
-    async function claimPromo() {
-      const raw = document.getElementById("sessionBox").value.trim();
-      const btn = document.getElementById("submitBtn");
-      if (!raw) {
-        showMsg("Vui lòng dán mã phiên ở Bước 1 vào ô trống!", false);
-        return;
-      }
-
-      btn.disabled = true;
-      btn.innerText = "⏳ Đang kiểm tra gói 0đ...";
-      document.getElementById("msg").style.display = "none";
-
-      const userId = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : null;
-
-      try {
-        const res = await fetch("/api/claim", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_raw: raw, chat_id: userId })
-        });
-        const data = await res.json();
-
-        if (!res.ok || !data.success) {
-          showMsg("❌ " + (data.error || "Tài khoản không đủ điều kiện nhận 0đ."), false);
-        } else {
-          showMsg("✅ Đủ điều kiện 0đ/tháng! Bot đã gửi thông báo & đang mở trang kích hoạt...", true);
-          setTimeout(() => {
-            tg.openLink(data.checkout_url);
-          }, 800);
-        }
-      } catch (e) {
-        showMsg("❌ Lỗi kết nối máy chủ, vui lòng thử lại.", false);
-      } finally {
-        btn.disabled = false;
-        btn.innerText = "Nhận Ưu Đãi Ngay";
-      }
-    }
-
-    function showMsg(text, ok) {
-      const el = document.getElementById("msg");
-      el.className = ok ? "ok" : "err";
-      el.innerText = text;
-      el.style.display = "block";
-    }
-  </script>
-</body>
-</html>
-"""
-
-
-def extract_token(raw_text: str) -> str:
-    raw_text = raw_text.strip()
-    if raw_text.startswith("{"):
-        try:
-            return json.loads(raw_text).get("accessToken", "")
-        except Exception:
-            return ""
-    if raw_text.startswith("eyJ") and len(raw_text) > 50:
-        return raw_text
-    return ""
-
-
-def notify_telegram_success(chat_id, clean_url: str):
-    if not chat_id or not TOKEN:
-        return
-    try:
-        api_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": (
-                "🎉 *Xác nhận ưu đãi 0đ/tháng thành công!*\n\n"
-                "Tài khoản ChatGPT của bạn đã được kích hoạt phiên thanh toán *₫0 / tháng*.\n"
-                "Bấm nút bên dưới để hoàn tất nhận gói Plus:"
-            ),
-            "parse_mode": "Markdown",
-            "reply_markup": {
-                "inline_keyboard": [[
-                    {"text": "💳 Mở trang thanh toán 0đ", "url": clean_url}
-                ]]
-            }
-        }
-        std_requests.post(api_url, json=payload, timeout=10)
-    except Exception:
-        pass
-
 
 @app.route("/")
 def home():
     return "Bot is running!"
 
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 
-@app.route("/miniapp")
-def serve_miniapp():
-    return Response(MINIAPP_HTML, mimetype="text/html")
+# LINK MINI APP NETLIFY CŨ CỦA BÁC
+WEB_APP_URL = "https://gentle-crepe-382315.netlify.app"
+PROMO_CODE = os.environ.get("PROMO_CODE", "plus-1-month-free")
+ADMIN_ID = os.environ.get("ADMIN_ID")  # Điền ID Telegram của bác trên Render nếu muốn nhận thông báo
+PROXY_URL = os.environ.get("PROXY_URL", "")
 
 
-@app.route("/api/claim", methods=["POST"])
-def api_claim():
-    if not SECRET_PROMO_ID:
-        return jsonify({"success": False, "error": "Chưa cấu hình PROMO_CODE trên Render."}), 500
+def check_promo_eligibility(raw_text: str) -> dict:
+    raw_text = raw_text.strip()
+    if not raw_text.startswith("{"):
+        return {"status": "invalid", "msg": "⚠️ Dữ liệu không đúng định dạng! Hãy sao chép toàn bộ nội dung từ trang lấy mã phiên (bắt đầu bằng dấu `{`)."}
 
-    body = request.get_json(silent=True) or {}
-    access_token = extract_token(body.get("session_raw", ""))
-    chat_id = body.get("chat_id")
+    try:
+        session_data = json.loads(raw_text)
+    except Exception:
+        return {"status": "invalid", "msg": "⚠️ Mã phiên bị cắt thiếu chữ! Vui lòng Chọn tất cả (Select All) và sao chép lại."}
 
-    if not access_token:
-        return jsonify({"success": False, "error": "Mã phiên không hợp lệ hoặc bạn chưa đăng nhập ChatGPT!"}), 400
+    token = session_data.get("accessToken")
+    email = session_data.get("user", {}).get("email", "Không rõ email")
+    plan_in_session = session_data.get("account", {}).get("planType", "free")
 
+    if not token:
+        return {"status": "invalid", "msg": "❌ Bạn chưa đăng nhập ChatGPT trên trình duyệt này (mã rỗng `{}`). Hãy đăng nhập trước rồi lấy lại mã!"}
+
+    # Trường hợp 1: Ngay trong mã phiên đã ghi nhận tài khoản đang có gói Plus (vừa kích hoạt 0đ xong)
+    if plan_in_session == "plus":
+        return {
+            "status": "activated",
+            "email": email,
+            "msg": f"🎉 **Xác nhận thành công!**\nTài khoản `{email}` đã kích hoạt gói **ChatGPT Plus**!"
+        }
+
+    # Trường hợp 2: Tài khoản đang là Free -> Hỏi trực tiếp API OpenAI xem có được nhận gói 0đ không
     headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Origin": "https://chatgpt.com",
         "Referer": "https://chatgpt.com/",
@@ -188,81 +66,133 @@ def api_claim():
 
     try:
         with cffi_requests.Session(impersonate="chrome", proxies=proxies) as client:
-            # 1. Kiểm tra điều kiện nhận mã 0đ
-            check_url = (
-                f"https://chatgpt.com/backend-api/promo_campaign/check_coupon"
-                f"?coupon={SECRET_PROMO_ID}&is_coupon_from_query_param=true"
-            )
-            chk = client.get(check_url, headers=headers, timeout=15)
-
-            if chk.status_code == 401:
-                return jsonify({"success": False, "error": "Phiên đăng nhập đã hết hạn, hãy lấy lại mã mới."}), 401
-            if chk.status_code == 403:
-                return jsonify({"success": False, "error": "IP Render đang bị Cloudflare chặn (403). Hãy gắn thêm biến PROXY_URL trên Render."}), 502
-
-            if chk.status_code == 200:
-                chk_data = chk.json()
-                if chk_data.get("is_eligible") is False or chk_data.get("valid") is False:
-                    return jsonify({"success": False, "error": "Tài khoản này không đủ điều kiện nhận gói 0đ/tháng."}), 400
-
-            # 2. Tạo phiên Checkout 0đ ẩn mã từ phía Server Render
-            co_payload = {
-                "plan_name": "chatgptplusplan",
-                "billing_details": {"country": "VN", "currency": "USD"},
-                "promo_campaign": {
-                    "promo_campaign_id": SECRET_PROMO_ID,
-                    "is_coupon_from_query_param": True
-                },
-                "checkout_ui_mode": "redirect"
-            }
-            co_resp = client.post(
-                "https://chatgpt.com/backend-api/payments/checkout",
+            # Kiểm tra trạng thái tài khoản mới nhất trên máy chủ OpenAI
+            acc_resp = client.get(
+                "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
                 headers=headers,
-                json=co_payload,
-                timeout=20
+                timeout=15
             )
+            if acc_resp.status_code == 401:
+                return {"status": "invalid", "msg": "❌ Phiên đăng nhập đã hết hạn, vui lòng mở lấy mã mới."}
+            if acc_resp.status_code == 403:
+                return {"status": "error", "msg": "⚠️ Máy chủ kiểm tra đang bận (Cloudflare 403). Cần gắn thêm PROXY_URL trên Render."}
 
-            if co_resp.status_code != 200:
-                return jsonify({
-                    "success": False,
-                    "error": "Tài khoản không áp được ưu đãi 0đ (đã từng dùng Plus hoặc hết lượt ưu đãi)."
-                }), 400
+            if acc_resp.status_code == 200:
+                acc_json = acc_resp.json()
+                accounts = acc_json.get("accounts", {})
+                default_acc = accounts.get("default", {})
+                entitlement = default_acc.get("entitlement", {})
 
-            raw_url = co_resp.json().get("url", "")
-            if not raw_url:
-                return jsonify({"success": False, "error": "Không tạo được phiên thanh toán từ OpenAI."}), 500
+                # Nếu vừa thanh toán 0đ xong nhưng session cũ chưa kịp cập nhật
+                if entitlement.get("has_active_subscription") is True:
+                    return {
+                        "status": "activated",
+                        "email": email,
+                        "msg": f"🎉 **Xác nhận thành công!**\nTài khoản `{email}` đã nhận gói **ChatGPT Plus** thành công!"
+                    }
 
-            # 3. Cắt bỏ hoàn toàn đuôi ?source=...&promo_campaign=...
-            clean_url = raw_url.split("?")[0]
+                # Kiểm tra nếu tài khoản từng đăng ký gói trả phí trước đây (thường sẽ mất quyền 0đ)
+                was_paid = default_acc.get("account", {}).get("was_paid_customer", False)
 
-            # 4. Tự động nhắn tin báo thành công vào Telegram của khách
-            notify_telegram_success(chat_id, clean_url)
+            # Gọi API kiểm tra trực tiếp mã khuyến mãi 0đ (chỉ GET nhẹ, không POST tạo đơn nên không lỗi tiền tệ)
+            promo_url = (
+                f"https://chatgpt.com/backend-api/promo_campaign/check_coupon"
+                f"?coupon={PROMO_CODE}&is_coupon_from_query_param=true"
+            )
+            chk_resp = client.get(promo_url, headers=headers, timeout=15)
 
-            return jsonify({"success": True, "checkout_url": clean_url})
+            if chk_resp.status_code == 200:
+                chk_data = chk_resp.json()
+                # Xét các cờ trả về của OpenAI
+                if chk_data.get("is_eligible") is False or chk_data.get("valid") is False:
+                    return {
+                        "status": "ineligible",
+                        "email": email,
+                        "msg": f"❌ **Không đủ điều kiện!**\nTài khoản `{email}` không áp dụng được ưu đãi 0đ/tháng. Vui lòng thử bằng tài khoản khác!"
+                    }
+                return {
+                    "status": "eligible",
+                    "email": email,
+                    "msg": f"✅ **Tài khoản hợp lệ nhận ưu đãi 0đ/tháng!**\nEmail: `{email}`\n*(Hiện chưa thêm thẻ thanh toán — bạn hãy bấm Nhận ưu đãi miễn phí trên web để kích hoạt lên Plus nhé)*."
+                }
+            else:
+                # Nếu API check_coupon trả mã lỗi 400/404 -> Tài khoản không được hưởng hoặc từng mua Plus
+                if was_paid:
+                    return {
+                        "status": "ineligible",
+                        "email": email,
+                        "msg": f"❌ **Không đủ điều kiện!**\nTài khoản `{email}` đã từng sử dụng gói trả phí trước đây nên không được nhận 0đ."
+                    }
+                return {
+                    "status": "ineligible",
+                    "email": email,
+                    "msg": f"❌ Tài khoản `{email}` không nhận được ưu đãi 0đ (Mã phản hồi: {chk_resp.status_code})."
+                }
 
     except Exception as e:
-        return jsonify({"success": False, "error": f"Lỗi kết nối: {str(e)}"}), 500
-
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+        return {"status": "error", "msg": f"⚠️ Lỗi kết nối khi kiểm tra: {str(e)}"}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    miniapp_url = f"{BASE_URL.rstrip('/')}/miniapp"
     keyboard = [
-        [InlineKeyboardButton("🎁 Nhận ưu đãi ChatGPT", web_app=WebAppInfo(url=miniapp_url))]
+        [InlineKeyboardButton("🎁 Nhận ưu đãi ChatGPT", web_app=WebAppInfo(url=WEB_APP_URL))],
+        [InlineKeyboardButton("✅ Kiểm tra đã nhận được ưu đãi chưa", callback_data="verify")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "Chào bạn! Bấm nút bên dưới để kiểm tra và mở khóa ưu đãi 1 tháng ChatGPT Plus (0đ):",
+        "Chào bạn! Bấm nút bên dưới để mở khóa ưu đãi 1 tháng ChatGPT Plus miễn phí:",
         reply_markup=reply_markup
     )
 
 
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "verify":
+        kb = [[InlineKeyboardButton("🔑 Mở trang lấy mã kiểm tra", url="https://chatgpt.com/api/auth/session")]]
+        await query.message.reply_text(
+            "🔍 **Cách kiểm tra tự động (không cần gửi ảnh):**\n\n"
+            "1️⃣ Bấm nút bên dưới để mở trang mã phiên trên trình duyệt bạn vừa đăng nhập ChatGPT.\n"
+            "2️⃣ **Chọn tất cả (Select All)** $\\rightarrow$ **Sao chép (Copy)** toàn bộ chữ trên màn hình.\n"
+            "3️⃣ Dán trực tiếp vào khung chat này và gửi cho Bot!",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+
+async def handle_session_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or ""
+    # Tự động xóa ngay tin nhắn chứa token của khách để bảo mật cho khách
+    if text.strip().startswith("{") and "accessToken" in text:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+    wait_msg = await update.message.reply_text("⏳ Đang kiểm tra trạng thái ưu đãi trên hệ thống...")
+    result = check_promo_eligibility(text)
+    await wait_msg.edit_text(result["msg"], parse_mode="Markdown")
+
+    # Báo tự động về Telegram của bác (nếu bác có cài ADMIN_ID trên Render)
+    if ADMIN_ID and result["status"] in ("activated", "eligible", "ineligible"):
+        user = update.effective_user
+        admin_text = (
+            f"🔔 **Báo cáo kiểm tra ưu đãi**\n"
+            f"👤 Khách: {user.full_name} (@{user.username or 'không có'})\n"
+            f"📧 Email ChatGPT: `{result.get('email')}`\n"
+            f"📊 Kết quả: **{result['status'].upper()}**"
+        )
+        try:
+            await context.bot.send_message(chat_id=int(ADMIN_ID), text=admin_text, parse_mode="Markdown")
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
+    TOKEN = os.environ.get("BOT_TOKEN")
     application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_session_text))
     application.run_polling()
